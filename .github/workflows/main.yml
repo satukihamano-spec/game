@@ -1,1 +1,193 @@
 
+# ============================================================
+#  Android APK 自動ビルド（Unity + GameCI）
+#
+#  ・GitHub の「Actions」タブから手動で実行できる（workflow_dispatch）
+#  ・main ブランチに push したときも自動で実行される
+#  ・Unity プロジェクトがまだリポジトリにないときは、ビルドをスキップして ✅ で終わる
+#  ・できた APK は、実行結果のページ下の「Artifacts」からダウンロードできる
+#
+#  Unity のバージョンは、プロジェクトの ProjectSettings/ProjectVersion.txt から自動で読み取る
+#  （このファイルでバージョンを決めることはしない＝プロジェクトと必ず同じバージョンでビルドされる）
+#
+#  必要な GitHub Secrets（Settings → Secrets and variables → Actions）：
+#    UNITY_LICENSE   … Unity の個人ライセンスファイル（Unity_lic.ulf）の中身すべて
+#    UNITY_EMAIL     … Unity アカウントのメールアドレス
+#    UNITY_PASSWORD  … Unity アカウントのパスワード
+# ============================================================
+name: Android Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# 同じブランチで新しいビルドが始まったら、古いビルドは止める（無料の実行時間の節約）
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    name: Android APK をビルド
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ① リポジトリのファイルを取り出す
+      - name: 1. ファイルを取得（checkout）
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      # ② ビルドの前に、よくある設定ミスをチェックして、分かりやすいメッセージを出す
+      - name: 2. 事前チェック（プロジェクト・Secrets）
+        id: precheck
+        shell: bash
+        env:
+          HAS_LICENSE: ${{ secrets.UNITY_LICENSE != '' }}
+          HAS_EMAIL: ${{ secrets.UNITY_EMAIL != '' }}
+          HAS_PASSWORD: ${{ secrets.UNITY_PASSWORD != '' }}
+        run: |
+          ok=true
+          echo "::group::Unity プロジェクトの確認"
+          if [ ! -f ProjectSettings/ProjectVersion.txt ]; then
+            echo "::warning title=Unityプロジェクトがまだありません::ProjectSettings/ProjectVersion.txt が見つからないので、今回は Unity のビルドをスキップします。Assets・Packages・ProjectSettings をリポジトリの一番上（ルート）に入れると、ビルドが始まります。"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::endgroup::"
+            {
+              echo "## ⏭ Unity のビルドはスキップしました"
+              echo ""
+              echo "workflow は正常に起動しています（\`on:\` の設定は OK）。"
+              echo "リポジトリに Unity プロジェクト（Assets・Packages・ProjectSettings）がまだないため、APK のビルドは行っていません。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          VERSION=$(grep -m1 'm_EditorVersion:' ProjectSettings/ProjectVersion.txt | awk '{print $2}' | tr -d '\r')
+          echo "このプロジェクトの Unity バージョン: ${VERSION}（このバージョンでビルドします）"
+          echo "unity_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          for d in Assets Packages ProjectSettings; do
+            if [ ! -d "$d" ]; then echo "::error title=フォルダがありません::$d フォルダがありません。Unity プロジェクトのフォルダをそのまま push してください。"; ok=false; fi
+          done
+          if [ -d Library ]; then
+            echo "::warning title=Library フォルダが含まれています::Library は自動生成されるフォルダなので、GitHub に入れなくてよいものです（.gitignore を確認してください）。"
+          fi
+          if [ ! -f ProjectSettings/EditorBuildSettings.asset ] || ! grep -q 'path: Assets/' ProjectSettings/EditorBuildSettings.asset; then
+            echo "::error title=ビルドするシーンが登録されていません::Unity で「StarGame → 2. ゲームシーンを作成」を実行し、変更をコミットして push してください（File → Build Profiles の Scene List にシーンが入っている必要があります）。"
+            ok=false
+          else
+            echo "ビルドするシーン:"
+            grep 'path: Assets/' ProjectSettings/EditorBuildSettings.asset | sed 's/^ *path: /  - /'
+          fi
+          echo "::endgroup::"
+
+          echo "::group::GitHub Secrets の確認（中身は表示されません）"
+          if [ "$HAS_LICENSE" != "true" ];  then echo "::error title=Secret がありません::UNITY_LICENSE が設定されていません（Unity_lic.ulf の中身をすべて貼り付けます）"; ok=false; fi
+          if [ "$HAS_EMAIL" != "true" ];    then echo "::error title=Secret がありません::UNITY_EMAIL が設定されていません（Unity アカウントのメールアドレス）"; ok=false; fi
+          if [ "$HAS_PASSWORD" != "true" ]; then echo "::error title=Secret がありません::UNITY_PASSWORD が設定されていません（Unity アカウントのパスワード）"; ok=false; fi
+          [ "$HAS_LICENSE" = "true" ] && [ "$HAS_EMAIL" = "true" ] && [ "$HAS_PASSWORD" = "true" ] && echo "Secrets: 3つとも設定されています"
+          echo "::endgroup::"
+
+          if [ "$ok" != "true" ]; then
+            echo "上の赤いエラー（::error）を直してから、もう一度実行してください。"
+            exit 1
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      # ③ ディスクの空き容量を増やす（Unity の Android 用イメージはとても大きいため）
+      - name: 3. ディスクの空き容量を確保
+        if: steps.precheck.outputs.ready == 'true'
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true # Android SDK は Unity のイメージに入っているので、ランナー側のものは消してよい
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+
+      # ④ Library フォルダ（Unity の作業用キャッシュ）を保存しておき、2回目以降のビルドを速くする
+      - name: 4. Library キャッシュを復元
+        if: steps.precheck.outputs.ready == 'true'
+        uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-Android-${{ steps.precheck.outputs.unity_version }}-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          restore-keys: |
+            Library-Android-${{ steps.precheck.outputs.unity_version }}-
+
+      # ⑤ Unity で Android の APK をビルドする
+      #    Android SDK / NDK / OpenJDK は、GameCI の Unity イメージ（unityci/editor の android 版）に入っている
+      - name: 5. Unity で Android APK をビルド（初回は30分以上かかることがあります）
+        if: steps.precheck.outputs.ready == 'true'
+        id: build
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          targetPlatform: Android
+          unityVersion: auto # ProjectSettings/ProjectVersion.txt のバージョンを使う
+          androidExportType: androidPackage # APK（Google Play 用の AAB は後で）
+          buildsPath: Builds
+          buildName: StarGame # → Builds/Android/StarGame.apk
+          versioning: None # アプリのバージョン番号はプロジェクトの設定のまま
+
+      # ⑥ APK ができたか確認する
+      - name: 6. できた APK を確認
+        if: steps.precheck.outputs.ready == 'true'
+        shell: bash
+        run: |
+          echo "Builds/Android の中身:"
+          ls -la Builds/Android || true
+          APK=$(find Builds/Android -maxdepth 2 -name '*.apk' | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "::error title=APK が見つかりません::ビルドは終わりましたが APK ができていません。上の「5. Unity で Android APK をビルド」のログを確認してください。"
+            exit 1
+          fi
+          SIZE=$(du -h "$APK" | cut -f1)
+          echo "APK: $APK（$SIZE）"
+          {
+            echo "## ✅ Android APK ができました"
+            echo ""
+            echo "- ファイル: \`$APK\`（$SIZE）"
+            echo "- Unity バージョン: ${{ steps.precheck.outputs.unity_version }}"
+            echo "- ダウンロード: このページを一番下までスクロールし、**Artifacts** の **StarGame-Android-APK-${{ github.run_number }}** をクリック"
+            echo "- ダウンロードされる zip を展開すると、中に StarGame.apk があります"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ⑦ APK を Artifacts としてアップロード（Actions の実行結果ページからダウンロードできる）
+      - name: 7. APK をアップロード（Artifacts）
+        if: steps.precheck.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: StarGame-Android-APK-${{ github.run_number }}
+          path: Builds/Android/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      # 失敗したときだけ：よくある原因を実行結果のページ（Summary）に表示する
+      - name: 失敗したときのヒントを表示
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## ❌ ビルドに失敗しました"
+            echo ""
+            echo "左の一覧で **赤い ✗ の付いた手順** をクリックすると、詳しいログが見られます。よくある原因："
+            echo ""
+            echo "| 失敗した手順 | よくある原因と対処 |"
+            echo "|---|---|"
+            echo "| 2. 事前チェック | 赤い枠のメッセージの通りに直してください（Secrets の未設定、シーン未登録など） |"
+            echo "| 5. Unity でビルド（License / activation の文字がある） | UNITY_LICENSE の中身が足りない・古い、メールアドレスやパスワードの間違い。Unity Hub でライセンスを取り直し、Unity_lic.ulf の中身を全部貼り直してください |"
+            echo "| 5. Unity でビルド（manifest unknown / image not found） | このプロジェクトの Unity バージョン（${{ steps.precheck.outputs.unity_version }}）のビルド用イメージがまだありません。https://game.ci/docs/docker/versions で確認してください |"
+            echo "| 5. Unity でビルド（error CS で始まる行） | C# のコードのエラーです。そのエラーの行を送ってください |"
+            echo "| 5. Unity でビルド（No space left on device） | ディスク不足です。もう一度実行してみてください |"
+            echo "| 6. APK を確認 | ビルドは終わったのに APK がありません。5 のログの最後のほうを確認してください |"
+          } >> "$GITHUB_STEP_SUMMARY"
