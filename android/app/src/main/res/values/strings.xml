@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DeathGame</string>
+    <string name="title_activity_main">DeathGame</string>
+    <string name="package_name">com.satukihamano.deathgame</string>
+    <string name="custom_url_scheme">com.satukihamano.deathgame</string>
+</resources>
