@@ -1,0 +1,66 @@
+# Android APK（デバッグ版）を自動で作るワークフロー
+#   流れ：Vite でビルド → Capacitor で android/ に反映 → Gradle で app-debug.apk を作る
+#   できた APK は、この実行結果ページの「Artifacts」からダウンロードできる
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # GitHub の画面から手動で実行するボタン
+
+# 同じブランチで続けて push したら、古い方の実行は止める（待ち時間とムダを減らす）
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: コードを取得
+        uses: actions/checkout@v4
+
+      # Capacitor 8 は Node 22 以上、Vite 8 は Node 20.19 / 22.12 以上が必要
+      - name: Node.js を準備
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: npm ci（package-lock.json どおりにインストール）
+        run: npm ci
+
+      - name: Web版をビルド（tsc + vite build → dist/）
+        run: npm run build
+
+      - name: Capacitor で android/ に反映（npx cap sync android）
+        run: npx cap sync android
+
+      # capacitor.build.gradle が Java 21 を指定しているので Java 21 を使う
+      - name: Java 21 を準備
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      # Windows から push すると実行権限が付かないことがあるので付けておく
+      - name: gradlew に実行権限を付ける
+        run: chmod +x android/gradlew
+
+      - name: APK をビルド（gradlew assembleDebug）
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: APK をアップロード（Artifacts）
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
